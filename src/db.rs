@@ -8,7 +8,6 @@ pub struct DBConnection {
 
 impl DBConnection {
     pub fn new() -> Result<Self> {
-        println!("{}", std::env::var("PSQL_URI").unwrap());
         Ok(Self {
             conn: Connection::connect(std::env::var("PSQL_URI").unwrap(), TlsMode::None)?,
         })
@@ -16,15 +15,11 @@ impl DBConnection {
 
     pub fn get_channels(&self) -> Result<Vec<i64>> {
         let rows = self.conn.query("SELECT discord FROM channels", &[])?;
-        let mut channels = Vec::new();
-        for row in &rows {
-            channels.push(row.get(0));
-        }
-        Ok(channels)
+        Ok(rows.into_iter().map(|v| v.get(0)).collect())
     }
 
     pub fn insert_channel(&self, channel_id: i64) -> Result<()> {
-        self.conn.execute("INSERT INTO channels (discord, channel_type) VALUES($1, $2)", &[&channel_id, &"image"])?;
+        self.conn.execute("INSERT INTO channels (discord) VALUES($1) ON CONFLICT DO NOTHING", &[&channel_id])?;
 
         Ok(())
     }
