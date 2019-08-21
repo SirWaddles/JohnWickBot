@@ -39,8 +39,13 @@ function AddMessageHook(type, callback) {
     });
 }
 
+function GetFileName() {
+    var now = new Date();
+    var fileName = now.getFullYear() + '_' + now.getMonth() + '_' + now.getDate() + '.png';
+    return fileName;
+}
+
 setInterval(() => {
-    BroadcastMessage("test_message", {
-        stuff: "stuff",
-    });
+    let fileName = GetFileName();
+    BroadcastMessage("image", fileName);
 }, 30000)

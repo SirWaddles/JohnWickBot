@@ -5,6 +5,22 @@ use futures::sync::mpsc;
 use tokio::net::{TcpStream, tcp::ConnectFuture};
 use tokio::timer::{Delay, Error as TimerError};
 use tokio::prelude::AsyncRead;
+use serde::{Deserialize};
+use serde_json::Value;
+
+#[derive(Deserialize)]
+struct InnerMessage {
+    #[serde(rename(deserialize="type"))]
+    msg_type: String,
+    data: Value,
+}
+
+#[derive(Deserialize)]
+struct MessageType {
+    #[serde(rename(deserialize="type"))]
+    msg_type: String,
+    data: InnerMessage,
+}
 
 pub struct ClientError;
 
@@ -20,9 +36,41 @@ impl From<TimerError> for ClientError {
     }
 }
 
-pub struct RequestState {
-    pub channel_id: u64,
-    pub message_content: String,
+impl From<serde_json::Error> for ClientError {
+    fn from(_err: serde_json::Error) -> Self {
+        Self
+    }
+}
+
+pub enum RequestState {
+    MessageBroadcast(String),
+    ImageBroadcast(String),
+    ImageRequest(String),
+}
+
+fn parse_message(message: &str) -> Result<RequestState, ClientError> {
+    let request: MessageType = serde_json::from_str(message)?;
+    if request.msg_type == "app.broadcast" {
+        if request.data.msg_type == "image" {
+            match request.data.data.as_str() {
+                Some(path) => return Ok(RequestState::ImageBroadcast(path.to_owned())),
+                None => return Err(ClientError),
+            };
+        }
+        if request.data.msg_type == "message_broadcast" {
+            match request.data.data.as_str() {
+                Some(msg) => return Ok(RequestState::MessageBroadcast(msg.to_owned())),
+                None => return Err(ClientError),
+            };
+        }
+    }
+    if request.msg_type == "app.receive_message" {
+        match request.data.data.as_str() {
+            Some(msg) => return Ok(RequestState::ImageRequest(msg.to_owned())),
+            None => return Err(ClientError),
+        };
+    }
+    Err(ClientError)
 }
 
 enum ClientFutureState {
@@ -52,11 +100,10 @@ impl ClientFuture {
     fn process_data(&self, data: Vec<u8>, len: usize) {
         match str::from_utf8(&data[0..len]) {
             Ok(v) => {
-                println!("Data: {}", v);
-                self.sender.unbounded_send(RequestState {
-                    message_content: "Hi there!".to_owned(),
-                    channel_id: 613583885699383307,
-                }).unwrap();
+                match parse_message(v) {
+                    Ok(message) => self.sender.unbounded_send(message).unwrap(),
+                    Err(e) => println!("Could not parse message: {}", v),
+                };
             },
             Err(_) => return,
         }
@@ -71,13 +118,11 @@ impl Future for ClientFuture {
         loop {
             match &mut self.state {
                 ClientFutureState::Disconnected => {
-                    println!("disconnected");
                     let when = Instant::now() + Duration::from_secs(30);
                     let delay = Delay::new(when);
                     self.state = ClientFutureState::Waiting(delay);
                 },
                 ClientFutureState::Waiting(delay) => {
-                    println!("waiting");
                     match delay.poll() {
                         Ok(Async::Ready(_)) => {
                             let connect = Self::connect();
@@ -90,7 +135,6 @@ impl Future for ClientFuture {
                     }
                 },
                 ClientFutureState::Connecting(connect) => {
-                    println!("connecting");
                     match connect.poll() {
                         Ok(Async::Ready(stream)) => {
                             self.state = ClientFutureState::Reading(stream);
@@ -102,7 +146,6 @@ impl Future for ClientFuture {
                     }
                 },
                 ClientFutureState::Reading(stream) => {
-                    println!("reading");
                     let mut data = vec![0u8; 256];
                     match stream.poll_read(&mut data) {
                         Ok(Async::Ready(bytes)) => {
