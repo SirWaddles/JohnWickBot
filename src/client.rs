@@ -73,21 +73,17 @@ impl Future for ClientFuture {
                 ClientFutureState::Disconnected => {
                     println!("disconnected");
                     let when = Instant::now() + Duration::from_secs(30);
-                    let mut delay = Delay::new(when);
-                    delay.poll()?;
+                    let delay = Delay::new(when);
                     self.state = ClientFutureState::Waiting(delay);
-                    break
                 },
                 ClientFutureState::Waiting(delay) => {
                     println!("waiting");
                     match delay.poll() {
                         Ok(Async::Ready(_)) => {
-                            let mut connect = Self::connect();
-                            connect.poll()?;
+                            let connect = Self::connect();
                             self.state = ClientFutureState::Connecting(connect);
-                            break
                         },
-                        Ok(Async::NotReady) => break,
+                        Ok(Async::NotReady) => return Ok(Async::NotReady),
                         Err(_) => {
                             return Err(ClientError);
                         }
@@ -99,7 +95,7 @@ impl Future for ClientFuture {
                         Ok(Async::Ready(stream)) => {
                             self.state = ClientFutureState::Reading(stream);
                         },
-                        Ok(Async::NotReady) => break,
+                        Ok(Async::NotReady) => return Ok(Async::NotReady),
                         Err(_) => {
                             self.state = ClientFutureState::Disconnected;
                         }
@@ -112,7 +108,7 @@ impl Future for ClientFuture {
                         Ok(Async::Ready(bytes)) => {
                             self.process_data(data, bytes);
                         },
-                        Ok(Async::NotReady) => break,
+                        Ok(Async::NotReady) => return Ok(Async::NotReady),
                         Err(_) => {
                             self.state = ClientFutureState::Disconnected;
                         },
@@ -120,6 +116,5 @@ impl Future for ClientFuture {
                 },
             };
         }
-        Ok(Async::NotReady)
     }
 }
