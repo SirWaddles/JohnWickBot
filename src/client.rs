@@ -1,54 +1,107 @@
-extern crate mio;
-
-use std::io::Read;
 use std::str;
-use std::{thread, time};
-use mio::net::TcpStream;
-use mio::{Events, Poll, PollOpt, Token, Ready};
+use std::time::{Duration, Instant};
+use futures::{Future, Async};
+use tokio::net::{TcpStream, tcp::ConnectFuture};
+use tokio::timer::{Delay, Error as TimerError};
+use tokio::prelude::AsyncRead;
 
-fn process_data(data: Vec<u8>) {
-    match str::from_utf8(&data) {
+fn process_data(data: Vec<u8>, len: usize) {
+    match str::from_utf8(&data[0..len]) {
         Ok(v) => println!("data: {} end", v),
         Err(_) => return,
     }
 }
 
-fn client_poll() -> std::io::Result<()> {
-    let mut stream = TcpStream::connect(&"127.0.0.1:27020".parse().expect("idk"))?;
-    stream.set_keepalive(Some(time::Duration::from_secs(30)))?;
-    let poll = Poll::new()?;
-    let mut events = Events::with_capacity(256);
-    poll.register(&stream, Token(0), Ready::readable() | Ready::writable(), PollOpt::edge())?;
+pub struct ClientError;
 
-    loop {
-        poll.poll(&mut events, Some(time::Duration::from_millis(500)))?;
-
-        for event in &events {
-            if event.readiness().is_readable() {
-                let mut buf: Vec<u8> = Vec::new();
-                match stream.read_to_end(&mut buf) {
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        true
-                    },
-                    Err(e) => return Err(e),
-                    Ok(_) => false,
-                };
-                process_data(buf);
-            }
-        }
+impl From<std::io::Error> for ClientError {
+    fn from(_err: std::io::Error) -> Self {
+        Self
     }
 }
 
-pub fn client_retry() -> std::io::Result<()> {
-    loop {
-        match client_poll() {
-            Ok(_) => return Ok(()),
-            Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset || e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                println!("Connection reset. Attempting reconnect in 30 seconds.");
-                thread::sleep(time::Duration::from_secs(30));
-                continue
+impl From<TimerError> for ClientError {
+    fn from(_err: TimerError) -> Self {
+        Self
+    }
+}
+
+enum ClientFutureState {
+    Connecting(ConnectFuture),
+    Reading(TcpStream),
+    Waiting(Delay),
+    Disconnected,
+}
+
+pub struct ClientFuture {
+    state: ClientFutureState,
+}
+
+impl ClientFuture {
+    pub fn new() -> Self {
+        Self {
+            state: ClientFutureState::Connecting(Self::connect()),
+        }
+    }
+
+    fn connect() -> ConnectFuture {
+        TcpStream::connect(&"127.0.0.1:27020".parse().unwrap())
+    }
+}
+
+impl Future for ClientFuture {
+    type Item = ();
+    type Error = ClientError;
+
+    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+        match &mut self.state {
+            ClientFutureState::Disconnected => {
+                let when = Instant::now() + Duration::from_secs(30);
+                let mut delay = Delay::new(when);
+                delay.poll()?;
+                self.state = ClientFutureState::Waiting(delay);
             },
-            Err(e) => return Err(e),
+            ClientFutureState::Waiting(delay) => {
+                match delay.poll() {
+                    Ok(Async::Ready(_)) => {
+                        let mut connect = Self::connect();
+                        connect.poll()?;
+                        self.state = ClientFutureState::Connecting(connect);
+                    },
+                    Ok(Async::NotReady) => (),
+                    Err(_) => {
+                        return Err(ClientError);
+                    }
+                }
+            },
+            ClientFutureState::Connecting(connect) => {
+                match connect.poll() {
+                    Ok(Async::Ready(stream)) => {
+                        self.state = ClientFutureState::Reading(stream);
+                        self.poll()?;
+                    },
+                    Ok(Async::NotReady) => (),
+                    Err(_) => {
+                        self.state = ClientFutureState::Disconnected;
+                        self.poll()?;
+                    }
+                }
+            },
+            ClientFutureState::Reading(stream) => {
+                let mut data = vec![0u8; 256];
+                match stream.poll_read(&mut data) {
+                    Ok(Async::Ready(bytes)) => {
+                        process_data(data, bytes);
+                        self.poll()?;
+                    },
+                    Ok(Async::NotReady) => (),
+                    Err(_) => {
+                        self.state = ClientFutureState::Disconnected;
+                        self.poll()?;
+                    },
+                };
+            },
         };
+        Ok(Async::NotReady)
     }
 }

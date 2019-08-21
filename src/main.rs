@@ -2,6 +2,7 @@ extern crate serenity;
 extern crate hyper;
 extern crate hyper_tls;
 extern crate futures;
+extern crate tokio;
 extern crate serde_json;
 
 mod client;
@@ -17,6 +18,7 @@ use hyper::rt;
 use hyper::http::Request;
 use futures::{Async, Stream};
 use futures::future::Future;
+use futures::sync::mpsc;
 
 type HyperClient = hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>;
 
@@ -63,6 +65,7 @@ struct HyperRuntime {
     requests: Arc<Mutex<RequestQueue>>,
     client: HyperClient,
     bot_token: String,
+    receiver: mpsc::UnboundedReceiver,
 }
 
 impl HyperRuntime {
@@ -135,14 +138,23 @@ fn main() {
 
     let https = hyper_tls::HttpsConnector::new(4).unwrap();
     let http_client = hyper::Client::builder().build::<_, hyper::Body>(https);
-    let fut = HyperRuntime {
+
+    let unb_channel = mspc::unbounded<RequestQueue>();
+
+    let hyper_runtime = HyperRuntime {
         requests: request_state,
         client: http_client,
         bot_token,
+        receiver: unb_channel.1,
     };
-    
+
+    let client_runtime = client::ClientFuture::new().map_err(|_| println!("Client Error"));
+
     thread::spawn(move || {
-        rt::run(fut);
+        rt::run(client_runtime.join(hyper_runtime).and_then(|_| {
+            println!("Runtimes finished");
+            Ok(())
+        }));
     });
 
     discord_client.start().unwrap();
