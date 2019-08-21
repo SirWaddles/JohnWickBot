@@ -60,7 +60,7 @@ impl TypeMapKey for DBMapKey {
     type Value = Mutex<DBConnection>;
 }
 
-fn send_message(client: &HyperClient, bot_token: &str, message_content: &str, channel_id: i64) -> Box<Future<Item = (), Error = ()> + Send> {
+fn send_message(client: &HyperClient, bot_token: &str, message_content: &str, channel_id: i64) -> Box<dyn Future<Item = (), Error = ()> + Send> {
     let uri = "https://discordapp.com/api/v6/channels/".to_owned() + &channel_id.to_string() + "/messages";
     let request_body = json!({
         "content": message_content
@@ -89,15 +89,16 @@ fn send_message(client: &HyperClient, bot_token: &str, message_content: &str, ch
         }))
 }
 
+const REQUEST_COUNT: usize = 100;
+
 struct MessageBroadcast {
-    total_requests: Vec<Box<Future<Item = (), Error = ()> + Send>>,
+    total_requests: Vec<Box<dyn Future<Item = (), Error = ()> + Send>>,
 }
 
 impl MessageBroadcast {
     fn new(client: &HyperClient, bot_token: &str, message_content: &str) -> Self {
-        /*let db = DBConnection::new().unwrap();
-        let channels = db.get_channels();*/
-        let channels: Vec<i64> = vec![613583885699383307];
+        let db = DBConnection::new().unwrap();
+        let channels = db.get_channels().unwrap();
 
         Self {
             total_requests: channels.into_iter().map(|v| send_message(client, bot_token, message_content, v)).collect(),
@@ -110,7 +111,25 @@ impl Future for MessageBroadcast {
     type Error = ();
 
     fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        Ok(Async::Ready(()))
+        let mut i = 0;
+        while i != self.total_requests.len() {
+            if i >= REQUEST_COUNT { return Ok(Async::NotReady); }
+            match self.total_requests[i].poll() {
+                Ok(Async::Ready(_)) => {
+                    self.total_requests.remove(i);
+                },
+                Ok(Async::NotReady) => {
+                    i += 1;
+                },
+                Err(e) => {
+                    self.total_requests.remove(i);
+                }
+            };
+        }
+        if self.total_requests.len() <= 0 {
+            return Ok(Async::Ready(()));
+        }
+        Ok(Async::NotReady)
     }
 }
 
@@ -133,7 +152,8 @@ impl Future for HyperRuntime {
             };
 
             if let RequestState::ImageBroadcast(filename) = request {
-                rt::spawn(MessageBroadcast::new(&self.client, &self.bot_token, &filename));
+                let message = "https://johnwickbot.shop/".to_owned() + &filename;
+                rt::spawn(MessageBroadcast::new(&self.client, &self.bot_token, &message));
             }
         }
     }
