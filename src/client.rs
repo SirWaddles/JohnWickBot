@@ -37,7 +37,9 @@ impl From<TimerError> for ClientError {
 }
 
 impl From<serde_json::Error> for ClientError {
-    fn from(_err: serde_json::Error) -> Self {
+    fn from(err: serde_json::Error) -> Self {
+        // yes
+        println!("error: {}", err);
         Self
     }
 }
@@ -98,7 +100,7 @@ impl ClientFuture {
     }
 
     fn process_data(&self, data: Vec<u8>, len: usize) {
-        match str::from_utf8(&data[0..len]) {
+        match str::from_utf8(&data[0..(len - 1)]) {
             Ok(v) => {
                 match parse_message(v) {
                     Ok(message) => self.sender.unbounded_send(message).unwrap(),
