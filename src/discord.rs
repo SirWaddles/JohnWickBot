@@ -1,9 +1,44 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use crate::db::DBConnection;
+use crate::signal::TerminationFuture;
 use serenity::Client;
-use serenity::prelude::{TypeMapKey, EventHandler, Context};
+use serenity::client::bridge::gateway::ShardManager;
+use serenity::prelude::{TypeMapKey, EventHandler, Context, Mutex as SerenityMutex};
 use serenity::model::channel::Message;
 use serenity::model::id::ChannelId;
+use futures::{Poll, Future, Async};
+use futures::future::Shared;
+
+pub struct DiscordTermination {
+    shard_manager: Arc<SerenityMutex<ShardManager>>,
+    exit_status: Shared<TerminationFuture>,
+}
+
+impl DiscordTermination {
+    pub fn new(shard_manager: Arc<SerenityMutex<ShardManager>>, exit_status: Shared<TerminationFuture>) -> Self {
+        Self {
+            shard_manager, exit_status
+        }
+    }
+}
+
+impl Future for DiscordTermination {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        match self.exit_status.poll() {
+            Ok(Async::Ready(_)) => {
+                println!("Stopping Discord");
+                let mut manager = self.shard_manager.lock();
+                manager.shutdown_all();
+                return Ok(Async::Ready(()));
+            },
+            Ok(Async::NotReady) => return Ok(Async::NotReady),
+            Err(_) => return Err(()),
+        }
+    }
+}
 
 struct JWHandler;
 

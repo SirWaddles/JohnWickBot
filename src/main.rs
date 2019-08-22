@@ -143,15 +143,16 @@ fn main() {
     };
 
     let client_runtime = client::ClientFuture::new(unb_channel.0, term_future.clone()).map_err(|_| println!("Client Error"));
+    let mut discord_client = discord::build_client();
+
+    let discord_end = discord::DiscordTermination::new(discord_client.shard_manager.clone(), term_future.clone());
 
     let runtime_thread = thread::spawn(move || {
-        tokio::run(client_runtime.join(hyper_runtime).and_then(|_| {
-            println!("Runtimes finished");
+        tokio::run(client_runtime.join3(hyper_runtime, discord_end).and_then(|_| {
             Ok(())
         }));
     });
 
-    let mut discord_client = discord::build_client();
     discord_client.start_autosharded().unwrap();
 
     runtime_thread.join().unwrap();
