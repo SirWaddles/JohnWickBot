@@ -1,12 +1,14 @@
 use std::str;
 use std::time::{Duration, Instant};
 use futures::{Future, Async};
+use futures::future::Shared;
 use futures::sync::mpsc;
 use tokio::net::{TcpStream, tcp::ConnectFuture};
 use tokio::timer::{Delay, Error as TimerError};
 use tokio::prelude::AsyncRead;
 use serde::{Deserialize};
 use serde_json::Value;
+use crate::signal;
 
 #[derive(Deserialize)]
 struct InnerMessage {
@@ -85,13 +87,15 @@ enum ClientFutureState {
 pub struct ClientFuture {
     state: ClientFutureState,
     sender: mpsc::UnboundedSender<RequestState>,
+    exit_status: Shared<signal::TerminationFuture>,
 }
 
 impl ClientFuture {
-    pub fn new(sender: mpsc::UnboundedSender<RequestState>) -> Self {
+    pub fn new(sender: mpsc::UnboundedSender<RequestState>, exit_status: Shared<signal::TerminationFuture>) -> Self {
         Self {
             state: ClientFutureState::Connecting(Self::connect()),
             sender,
+            exit_status,
         }
     }
 
@@ -104,7 +108,7 @@ impl ClientFuture {
             Ok(v) => {
                 match parse_message(v) {
                     Ok(message) => self.sender.unbounded_send(message).unwrap(),
-                    Err(e) => println!("Could not parse message: {}", v),
+                    Err(_) => println!("Could not parse message: {}", v),
                 };
             },
             Err(_) => return,
@@ -117,6 +121,11 @@ impl Future for ClientFuture {
     type Error = ClientError;
 
     fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+        match self.exit_status.poll() {
+            Ok(Async::Ready(_)) => return Ok(Async::Ready(())),
+            Ok(Async::NotReady) => (),
+            Err(_) => return Err(ClientError),
+        };
         loop {
             match &mut self.state {
                 ClientFutureState::Disconnected => {
