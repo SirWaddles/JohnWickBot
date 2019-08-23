@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::fs;
 use crate::db::DBConnection;
 use crate::signal::TerminationFuture;
 use serenity::Client;
@@ -43,7 +44,7 @@ impl Future for DiscordTermination {
 struct JWHandler;
 
 impl JWHandler {
-    fn send_message(&self, ctx: &Context, channel: ChannelId, message: &'static str) {
+    fn send_message(&self, ctx: &Context, channel: ChannelId, message: &str) {
         if let Err(why) = channel.say(&ctx.http, message) {
             println!("Error sending message to channel {}: {}", channel.0, why);
         }
@@ -55,15 +56,24 @@ impl EventHandler for JWHandler {
         let data_lock = ctx.data.read();
         let db = data_lock.get::<DBMapKey>().unwrap().lock().unwrap();
         if msg.content == "!subscribe" {
-            db.insert_channel(msg.channel_id.0 as i64).unwrap();
-            self.send_message(&ctx, msg.channel_id, "Thanks! I'll let you know in this channel.");
+            match msg.channel_id.say(&ctx.http, "Thanks! I'll let you know in this channel.") {
+                Ok(_res) => db.insert_channel(msg.channel_id.0 as i64).unwrap(),
+                Err(why) => {
+                    println!("Could not send message to channel {}: {}", msg.channel_id.0, why);
+                    if let Err(awhy) = msg.author.direct_message(&ctx, |m| m.content("I was not able to subscribe to that channel. I may not have permissions to do so.")) {
+                        println!("Could not send DM to subscriber: {}", awhy);
+                    }
+                }
+            };
         }
         if msg.content == "!unsubscribe" {
             db.delete_channel(msg.channel_id.0 as i64).unwrap();
             self.send_message(&ctx, msg.channel_id, "I'll stop sending messages here.");
         }
         if msg.content == "!help" {
-            self.send_message(&ctx, msg.channel_id, "I'm a bot.");
+            if let Ok(help_string) = fs::read_to_string("./helptext.txt") {
+                self.send_message(&ctx, msg.channel_id, &help_string);
+            }
         }
     }
 }
