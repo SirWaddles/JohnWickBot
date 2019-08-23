@@ -104,6 +104,7 @@ impl ClientFuture {
     }
 
     fn process_data(&self, data: Vec<u8>, len: usize) {
+        println!("Received Message {} bytes long.", len);
         match str::from_utf8(&data[0..(len - 1)]) {
             Ok(v) => {
                 match parse_message(v) {
@@ -162,7 +163,12 @@ impl Future for ClientFuture {
                     let mut data = vec![0u8; 256];
                     match stream.poll_read(&mut data) {
                         Ok(Async::Ready(bytes)) => {
-                            self.process_data(data, bytes);
+                            // I have no idea why this is happening, but I'm spinning on zero-byte messages on a disconnected socket.
+                            if bytes > 0 {
+                                self.process_data(data, bytes);
+                            } else {
+                                self.state = ClientFutureState::Disconnected;
+                            }
                         },
                         Ok(Async::NotReady) => return Ok(Async::NotReady),
                         Err(_) => {
