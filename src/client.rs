@@ -129,6 +129,7 @@ impl Future for ClientFuture {
         loop {
             match &mut self.state {
                 ClientFutureState::Disconnected => {
+                    println!("Socket disconnected");
                     let when = Instant::now() + Duration::from_secs(30);
                     let delay = Delay::new(when);
                     self.state = ClientFutureState::Waiting(delay);
@@ -136,6 +137,7 @@ impl Future for ClientFuture {
                 ClientFutureState::Waiting(delay) => {
                     match delay.poll() {
                         Ok(Async::Ready(_)) => {
+                            println!("Attempting Reconnect");
                             let connect = Self::connect();
                             self.state = ClientFutureState::Connecting(connect);
                         },
