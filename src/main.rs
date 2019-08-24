@@ -18,7 +18,7 @@ use serde_json::{json, Value as JsonValue};
 use hyper::http::Request;
 use hyper::{StatusCode, HeaderMap};
 use futures::{Async, Stream, try_ready};
-use futures::future::{self, Shared, Future};
+use futures::future::{Shared, Future};
 use futures::sync::mpsc;
 use client::RequestState;
 
@@ -115,7 +115,7 @@ fn send_message(client: &Arc<HyperClient>, bot_token: &str, message_content: &st
     Box::new(client.request(request)
         .and_then(|res| {
             let status = BroadcastResult::new(res.status(), res.headers());
-            res.into_body().concat2().join(future::ok(status))
+            res.into_body().concat2().map(move |body| (body, status))
         })
         .and_then(|(body, status)| {
             let s = std::str::from_utf8(&body).unwrap();
