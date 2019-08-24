@@ -117,9 +117,9 @@ fn send_message(client: &Arc<HyperClient>, bot_token: &str, message_content: &st
             let status = BroadcastResult::new(res.status(), res.headers());
             res.into_body().concat2().join(future::ok(status))
         })
-        .and_then(|body| {
-            let s = std::str::from_utf8(&body.0).unwrap();
-            Ok(BroadcastResult::from(&body.1, s.to_owned()))
+        .and_then(|(body, status)| {
+            let s = std::str::from_utf8(&body).unwrap();
+            Ok(BroadcastResult::from(&status, s.to_owned()))
         })
         .map_err(|err| {
             println!("Error sending response: {}", err);
@@ -144,7 +144,7 @@ impl BroadcastInstance {
     } 
 }
 
-const REQUEST_COUNT: usize = 100;
+const REQUEST_COUNT: usize = 30;
 
 struct MessageBroadcast {
     client: Arc<HyperClient>,
