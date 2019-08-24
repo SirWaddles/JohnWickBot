@@ -11,17 +11,89 @@ mod db;
 mod signal;
 mod discord;
 
-use std::thread;
-use serde_json::json;
+use std::sync::Arc;
+use std::{cmp, thread, time};
+use tokio::timer;
+use serde_json::{json, Value as JsonValue};
 use hyper::http::Request;
+use hyper::{StatusCode, HeaderMap};
 use futures::{Async, Stream, try_ready};
-use futures::future::{Shared, Future};
+use futures::future::{self, Shared, Future};
 use futures::sync::mpsc;
 use client::RequestState;
 
 type HyperClient = hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>;
 
-fn send_message(client: &HyperClient, bot_token: &str, message_content: &str, channel_id: i64) -> Box<dyn Future<Item = (), Error = ()> + Send> {
+#[derive(Debug, Clone)]
+enum BroadcastResultType {
+    Success,
+    Forbidden,
+    MissingPermissions,
+    MissingAccess,
+    RateLimited,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct BroadcastResult {
+    status: BroadcastResultType,
+    rate_limit_stamp: u64,
+    rate_limit_left: u32,
+    rate_limit_retry: u64,
+    message_body: Option<String>,
+}
+
+impl BroadcastResult {
+    fn new(status_code: StatusCode, headers: &HeaderMap) -> Self {
+        Self {
+            status: match status_code {
+                StatusCode::OK => BroadcastResultType::Success,
+                StatusCode::FORBIDDEN => BroadcastResultType::Forbidden,
+                StatusCode::TOO_MANY_REQUESTS => BroadcastResultType::RateLimited,
+                _ => BroadcastResultType::Unknown,
+            },
+            rate_limit_left: match headers.get("X-RateLimit-Remaining") {
+                Some(val) => val.to_str().unwrap().parse().unwrap(),
+                None => 0,
+            },
+            rate_limit_stamp: match headers.get("X-RateLimit-Reset") {
+                Some(val) => val.to_str().unwrap().parse().unwrap(),
+                None => 0,
+            },
+            rate_limit_retry: 0,
+            message_body: None,
+        }
+    }
+
+    fn from(&self, message_body: String) -> Self {
+        let response: JsonValue = match serde_json::from_str(&message_body) {
+            Ok(val) => val,
+            Err(_) => return self.clone(),
+        };
+        let mut res = self.clone();
+        match self.status {
+            BroadcastResultType::Forbidden => {
+                let code = response["code"].as_u64().unwrap();
+                res.status = match code {
+                    50001 => BroadcastResultType::MissingAccess,
+                    50013 => BroadcastResultType::MissingPermissions,
+                    _ => BroadcastResultType::Unknown,
+                };
+            },
+            BroadcastResultType::RateLimited => {
+                let limit = response["retry_after"].as_u64().unwrap();
+                res.rate_limit_retry = limit;
+            }
+            _ => (),
+        };
+
+        res.message_body = Some(message_body);
+
+        res
+    }
+}
+
+fn send_message(client: &Arc<HyperClient>, bot_token: &str, message_content: &str, channel_id: i64) -> Box<dyn Future<Item = BroadcastResult, Error = ()> + Send> {
     let uri = "https://discordapp.com/api/v6/channels/".to_owned() + &channel_id.to_string() + "/messages";
     let request_body = json!({
         "content": message_content
@@ -37,33 +109,101 @@ fn send_message(client: &HyperClient, bot_token: &str, message_content: &str, ch
 
     Box::new(client.request(request)
         .and_then(|res| {
-            println!("req status: {}", res.status());
-            res.into_body().concat2()
+            let status = BroadcastResult::new(res.status(), res.headers());
+            res.into_body().concat2().join(future::ok(status))
         })
         .and_then(|body| {
-            let s = std::str::from_utf8(&body).unwrap();
-            println!("body: {}", s);
-            Ok(())
+            let s = std::str::from_utf8(&body.0).unwrap();
+            Ok(BroadcastResult::from(&body.1, s.to_owned()))
         })
         .map_err(|err| {
             println!("Error sending response: {}", err);
         }))
 }
 
+struct BroadcastInstance {
+    attempt: Box<dyn Future<Item = BroadcastResult, Error = ()> + Send>,
+    channel_id: i64,
+}
+
+impl BroadcastInstance {
+    fn new(client: &Arc<HyperClient>, bot_token: &str, message_content: &str, channel_id: i64) -> Self {
+        Self {
+            attempt: send_message(client, bot_token, message_content, channel_id),
+            channel_id: channel_id,
+        }
+    }
+
+    fn retry(&mut self, client: &Arc<HyperClient>, bot_token: &str, message_content: &str) {
+        self.attempt = send_message(client, bot_token, message_content, self.channel_id);
+    } 
+}
+
 const REQUEST_COUNT: usize = 100;
 
 struct MessageBroadcast {
-    total_requests: Vec<Box<dyn Future<Item = (), Error = ()> + Send>>,
+    client: Arc<HyperClient>,
+    total_requests: Vec<BroadcastInstance>,
+    ongoing_requests: Vec<BroadcastInstance>,
+    bot_token: String,
+    message_content: String,
+    timer: Option<timer::Delay>,
+    db: db::DBConnection,
 }
 
 impl MessageBroadcast {
-    fn new(client: &HyperClient, bot_token: &str, message_content: &str) -> Self {
+    fn new(client: &Arc<HyperClient>, bot_token: &str, message_content: &str) -> Self {
         let db = db::DBConnection::new().unwrap();
         let channels = db.get_channels().unwrap();
 
         Self {
-            total_requests: channels.into_iter().map(|v| send_message(client, bot_token, message_content, v)).collect(),
+            client: client.clone(),
+            total_requests: channels.into_iter().map(|v| BroadcastInstance::new(client, bot_token, message_content, v)).collect(),
+            bot_token: bot_token.to_owned(),
+            message_content: message_content.to_owned(),
+            ongoing_requests: Vec::new(),
+            timer: None,
+            db: db::DBConnection::new().unwrap(),
         }
+    }
+
+    /*fn start_waiting_stamp(&mut self, timestamp: u64) {
+        if let Some(_) = self.timer {
+            // Already waiting. Don't replace timer.
+            return;
+        }
+        let now_stamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
+        let time_until = (timestamp as i64) - (now_stamp as i64);
+        if time_until <= 0 {
+            // Okay so we've already passed the timestamp. Just move on.
+            return;
+        }
+        let mut timer = timer::Delay::new(time::Instant::now() + time::Duration::from_secs(time_until as u64));
+        // Have to poll the timer to register an interest.
+        match timer.poll() {
+            Ok(_) => (),
+            Err(_) => panic!("Timer poll errored"),
+        };
+        self.timer = Some(timer);
+    }*/
+
+    fn start_waiting_retry(&mut self, time_until: u64) {
+        if let Some(_) = self.timer {
+            // Already waiting. Don't replace timer.
+            return;
+        }
+
+        let mut timer = timer::Delay::new(time::Instant::now() + time::Duration::from_millis(time_until + 200));
+        // Have to poll the timer to register an interest.
+        match timer.poll() {
+            Ok(_) => (),
+            Err(_) => panic!("Timer poll errored"),
+        };
+        self.timer = Some(timer);
+    }
+
+    fn unsubscribe_instance(&self, instance: &BroadcastInstance) {
+        self.db.delete_channel(instance.channel_id).unwrap();
     }
 }
 
@@ -72,22 +212,77 @@ impl Future for MessageBroadcast {
     type Error = ();
 
     fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+        // Find out if waiting on rate limits
+        let waiting = match &mut self.timer {
+            Some(val) => {
+                match val.poll() {
+                    Ok(Async::Ready(_)) => {
+                        self.timer = None;
+                        false
+                    },
+                    Ok(Async::NotReady) => true,
+                    Err(_) => panic!("Timer returned error"),
+                }
+            },
+            None => false,
+        };
+
+        // Add more requests to concurrent queue
+        if waiting == false {
+            let new_requests = cmp::min(self.total_requests.len(), REQUEST_COUNT - self.ongoing_requests.len());
+            for _ in 0..new_requests {
+                self.ongoing_requests.push(self.total_requests.remove(0));
+            }
+        }
+
+        // Process ongoing requests
         let mut i = 0;
-        while i != self.total_requests.len() {
-            if i >= REQUEST_COUNT { return Ok(Async::NotReady); }
-            match self.total_requests[i].poll() {
-                Ok(Async::Ready(_)) => {
-                    self.total_requests.remove(i);
+        while i != self.ongoing_requests.len() {
+            match self.ongoing_requests[i].attempt.poll() {
+                Ok(Async::Ready(res)) => {
+                    let mut request = self.ongoing_requests.remove(i);
+                    match res.status {
+                        BroadcastResultType::Success => {
+                            // Message delivered, instance removed from queue.
+                            // Do nothing here.
+                        },
+                        BroadcastResultType::MissingAccess | BroadcastResultType::MissingPermissions => {
+                            // Bot's been removed from channel/guild
+                            // Unsubscribe this channel
+                            self.unsubscribe_instance(&request);
+                        },
+                        BroadcastResultType::RateLimited => {
+                            // Message didn't get delivered due to rate limits
+                            // Likely returned while other requests were processing.
+                            // Start it again and move it to the end of the queue
+                            request.retry(&self.client, &self.bot_token, &self.message_content);
+                            self.total_requests.push(request);
+                            // Start wait timer if not already started
+                            if res.rate_limit_retry != 0 {
+                                self.start_waiting_retry(res.rate_limit_retry);
+                            } else {
+                                // No retry value, not sure why.
+                                // Just wait 1s
+                                self.start_waiting_retry(1000);
+                            }
+                            // Just monitoring the rate limits for awhile, seeing how many repeats
+                            println!("Request Limited: {:#?}", res);
+                        },
+                        BroadcastResultType::Forbidden | BroadcastResultType::Unknown => {
+                            // An unknown error, just log and move on.
+                            println!("Request Error: {:#?}", res);
+                        },
+                    };
                 },
                 Ok(Async::NotReady) => {
                     i += 1;
                 },
                 Err(_) => {
-                    self.total_requests.remove(i);
+                    self.ongoing_requests.remove(i);
                 }
             };
         }
-        if self.total_requests.len() <= 0 {
+        if self.ongoing_requests.len() <= 0 && self.total_requests.len() <= 0 {
             return Ok(Async::Ready(()));
         }
         Ok(Async::NotReady)
@@ -95,7 +290,7 @@ impl Future for MessageBroadcast {
 }
 
 struct HyperRuntime {
-    client: HyperClient,
+    client: Arc<HyperClient>,
     bot_token: String,
     receiver: mpsc::UnboundedReceiver<RequestState>,
     exit_status: Shared<signal::TerminationFuture>,
@@ -136,7 +331,7 @@ fn main() {
 
     let bot_token = std::env::var("DISCORD_TOKEN").unwrap();
     let hyper_runtime = HyperRuntime {
-        client: http_client,
+        client: Arc::new(http_client),
         bot_token,
         receiver: unb_channel.1,
         exit_status: term_future.clone(),
