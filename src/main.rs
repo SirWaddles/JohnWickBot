@@ -40,6 +40,7 @@ struct BroadcastResult {
     rate_limit_stamp: u64,
     rate_limit_left: u32,
     rate_limit_retry: u64,
+    rate_limit_bucket: Option<String>,
     message_body: Option<String>,
 }
 
@@ -61,6 +62,10 @@ impl BroadcastResult {
                 None => 0,
             },
             rate_limit_retry: 0,
+            rate_limit_bucket: match headers.get("X-RateLimit-Bucket") {
+                Some(val) => Some(val.to_str().unwrap().to_owned()),
+                None => None,
+            },
             message_body: None,
         }
     }
@@ -155,7 +160,7 @@ impl MessageBroadcast {
     fn new(client: &Arc<HyperClient>, bot_token: &str, message_content: &str) -> Self {
         let db = db::DBConnection::new().unwrap();
         let channels = db.get_channels().unwrap();
-
+        
         Self {
             client: client.clone(),
             total_requests: channels.into_iter().map(|v| BroadcastInstance::new(client, bot_token, message_content, v)).collect(),
@@ -163,7 +168,7 @@ impl MessageBroadcast {
             message_content: message_content.to_owned(),
             ongoing_requests: Vec::new(),
             timer: None,
-            db: db::DBConnection::new().unwrap(),
+            db,
         }
     }
 
@@ -243,6 +248,7 @@ impl Future for MessageBroadcast {
                     let mut request = self.ongoing_requests.remove(i);
                     match res.status {
                         BroadcastResultType::Success => {
+                            println!("Request Success: {:#?}", res);
                             // Message delivered, instance removed from queue.
                             // Do nothing here.
                         },
