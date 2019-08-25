@@ -248,7 +248,6 @@ impl Future for MessageBroadcast {
                     let mut request = self.ongoing_requests.remove(i);
                     match res.status {
                         BroadcastResultType::Success => {
-                            println!("Request Success: {:#?}", res);
                             // Message delivered, instance removed from queue.
                             // Do nothing here.
                         },
@@ -272,7 +271,7 @@ impl Future for MessageBroadcast {
                                 self.start_waiting_retry(1000);
                             }
                             // Just monitoring the rate limits for awhile, seeing how many repeats
-                            println!("Request Limited: {:#?}", res);
+                            println!("Request Rate Limited: Wait Until {}", res.rate_limit_retry);
                         },
                         BroadcastResultType::Forbidden | BroadcastResultType::Unknown => {
                             // An unknown error, just log and move on.
