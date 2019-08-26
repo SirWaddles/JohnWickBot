@@ -56,14 +56,24 @@ impl EventHandler for JWHandler {
         let data_lock = ctx.data.read();
         let db = data_lock.get::<DBMapKey>().unwrap().lock().unwrap();
         if msg.content == "!subscribe" {
-            match msg.channel_id.say(&ctx.http, "Thanks! I'll let you know in this channel.") {
-                Ok(_res) => db.insert_channel(msg.channel_id.0 as i64).unwrap(),
-                Err(why) => {
-                    println!("Could not send message to channel {}: {}", msg.channel_id.0, why);
-                    if let Err(awhy) = msg.author.direct_message(&ctx, |m| m.content("I was not able to subscribe to that channel. I may not have permissions to do so.")) {
-                        println!("Could not send DM to subscriber: {}", awhy);
-                    }
-                }
+            match db.channel_exists(msg.channel_id.0 as i64) {
+                Ok(true) => {
+                    self.send_message(&ctx, msg.channel_id, "This channel is already subscribed.");
+                },
+                Ok(false) => {
+                    match msg.channel_id.say(&ctx.http, "Thanks! I'll let you know in this channel.") {
+                        Ok(_res) => db.insert_channel(msg.channel_id.0 as i64).unwrap(),
+                        Err(why) => {
+                            println!("Could not send message to channel {}: {}", msg.channel_id.0, why);
+                            if let Err(awhy) = msg.author.direct_message(&ctx, |m| m.content("I was not able to subscribe to that channel. I may not have permissions to do so.")) {
+                                println!("Could not send DM to subscriber: {}", awhy);
+                            }
+                        }
+                    };
+                },
+                Err(_) => {
+                    println!("Database failed I guess");
+                },
             };
         }
         if msg.content == "!unsubscribe" {
