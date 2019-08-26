@@ -28,6 +28,8 @@ type HyperClient = hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpCo
 enum BroadcastResultType {
     Success,
     Forbidden,
+    NotFound,
+    UknownChannel,
     MissingPermissions,
     MissingAccess,
     RateLimited,
@@ -51,6 +53,7 @@ impl BroadcastResult {
                 StatusCode::OK => BroadcastResultType::Success,
                 StatusCode::FORBIDDEN => BroadcastResultType::Forbidden,
                 StatusCode::TOO_MANY_REQUESTS => BroadcastResultType::RateLimited,
+                StatusCode::NOT_FOUND => BroadcastResultType::NotFound,
                 _ => BroadcastResultType::Unknown,
             },
             rate_limit_left: match headers.get("X-RateLimit-Remaining") {
@@ -88,7 +91,15 @@ impl BroadcastResult {
             BroadcastResultType::RateLimited => {
                 let limit = response["retry_after"].as_u64().unwrap();
                 res.rate_limit_retry = limit;
-            }
+            },
+            BroadcastResultType::NotFound => {
+                if let Some(code) = response["code"].as_u64() {
+                    res.status = match code {
+                        10003 => BroadcastResultType::UknownChannel,
+                        _ => BroadcastResultType::Unknown,
+                    };
+                }
+            },
             _ => (),
         };
 
@@ -160,6 +171,8 @@ impl MessageBroadcast {
     fn new(client: &Arc<HyperClient>, bot_token: &str, message_content: &str) -> Self {
         let db = db::DBConnection::new().unwrap();
         let channels = db.get_channels().unwrap();
+
+        println!("Starting Broadcast: {}", message_content);
         
         Self {
             client: client.clone(),
@@ -251,7 +264,7 @@ impl Future for MessageBroadcast {
                             // Message delivered, instance removed from queue.
                             // Do nothing here.
                         },
-                        BroadcastResultType::MissingAccess | BroadcastResultType::MissingPermissions => {
+                        BroadcastResultType::MissingAccess | BroadcastResultType::MissingPermissions | BroadcastResultType::UknownChannel => {
                             // Bot's been removed from channel/guild
                             // Unsubscribe this channel
                             self.unsubscribe_instance(&request);
@@ -273,7 +286,7 @@ impl Future for MessageBroadcast {
                             // Just monitoring the rate limits for awhile, seeing how many repeats
                             println!("Request Rate Limited: Wait Until {}", res.rate_limit_retry);
                         },
-                        BroadcastResultType::Forbidden | BroadcastResultType::Unknown => {
+                        BroadcastResultType::Forbidden | BroadcastResultType::NotFound | BroadcastResultType::Unknown => {
                             // An unknown error, just log and move on.
                             println!("Request Error: {:#?}", res);
                         },
@@ -288,6 +301,7 @@ impl Future for MessageBroadcast {
             };
         }
         if self.ongoing_requests.len() <= 0 && self.total_requests.len() <= 0 {
+            println!("Broadcast Finished");
             return Ok(Async::Ready(()));
         }
         Ok(Async::NotReady)
@@ -318,10 +332,17 @@ impl Future for HyperRuntime {
                 None => return Ok(Async::Ready(())),
             };
 
-            if let RequestState::ImageBroadcast(filename) = request {
-                let message = "https://johnwickbot.shop/".to_owned() + &filename;
-                tokio::spawn(MessageBroadcast::new(&self.client, &self.bot_token, &message));
-            }
+
+            match request {
+                RequestState::ImageBroadcast(filename) => {
+                    let message = "https://johnwickbot.shop/".to_owned() + &filename;
+                    tokio::spawn(MessageBroadcast::new(&self.client, &self.bot_token, &message));
+                },
+                RequestState::MessageBroadcast(message) => {
+                    tokio::spawn(MessageBroadcast::new(&self.client, &self.bot_token, &message));
+                },
+                _ => (),
+            };
         }
     }
 }
