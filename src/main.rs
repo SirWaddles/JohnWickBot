@@ -29,7 +29,7 @@ enum BroadcastResultType {
     Success,
     Forbidden,
     NotFound,
-    UknownChannel,
+    UnknownChannel,
     MissingPermissions,
     MissingAccess,
     RateLimited,
@@ -95,7 +95,7 @@ impl BroadcastResult {
             BroadcastResultType::NotFound => {
                 if let Some(code) = response["code"].as_u64() {
                     res.status = match code {
-                        10003 => BroadcastResultType::UknownChannel,
+                        10003 => BroadcastResultType::UnknownChannel,
                         _ => BroadcastResultType::Unknown,
                     };
                 }
@@ -264,7 +264,7 @@ impl Future for MessageBroadcast {
                             // Message delivered, instance removed from queue.
                             // Do nothing here.
                         },
-                        BroadcastResultType::MissingAccess | BroadcastResultType::MissingPermissions | BroadcastResultType::UknownChannel => {
+                        BroadcastResultType::MissingAccess | BroadcastResultType::MissingPermissions | BroadcastResultType::UnknownChannel => {
                             // Bot's been removed from channel/guild
                             // Unsubscribe this channel
                             self.unsubscribe_instance(&request);
