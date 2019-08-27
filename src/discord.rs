@@ -3,8 +3,9 @@ use std::fs;
 use crate::db::DBConnection;
 use crate::signal::TerminationFuture;
 use serenity::Client;
-use serenity::client::bridge::gateway::ShardManager;
+use serenity::client::bridge::gateway::{ShardManager, event::ShardStageUpdateEvent};
 use serenity::prelude::{TypeMapKey, EventHandler, Context, Mutex as SerenityMutex};
+use serenity::gateway::ConnectionStage;
 use serenity::model::channel::Message;
 use serenity::model::id::ChannelId;
 use futures::{Poll, Future, Async};
@@ -84,6 +85,17 @@ impl EventHandler for JWHandler {
             if let Ok(help_string) = fs::read_to_string("./helptext.txt") {
                 self.send_message(&ctx, msg.channel_id, &help_string);
             }
+        }
+    }
+
+    fn shard_stage_update(&self, ctx: Context, evt: ShardStageUpdateEvent) {
+        use serenity::model::gateway::Activity;
+        use serenity::model::user::OnlineStatus;
+
+        if evt.new == ConnectionStage::Connected {
+            let activity = Activity::playing("Type !help");
+            let status = OnlineStatus::Online;
+            ctx.set_presence(Some(activity), status);
         }
     }
 }
