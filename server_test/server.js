@@ -45,7 +45,7 @@ function GetFileName() {
     return fileName;
 }
 
-setInterval(() => {
-    let fileName = GetFileName();
-    BroadcastMessage("image", fileName);
-}, 30000)
+AddMessageHook('request_shop', data => {
+	console.log(data);
+    return "https://johnwickbot.shop/" + GetFileName();
+});

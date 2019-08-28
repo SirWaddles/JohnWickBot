@@ -1,27 +1,54 @@
 use std::str;
 use std::time::{Duration, Instant};
-use futures::{Future, Async};
+use futures::{Future, Async, Poll, Stream};
 use futures::future::Shared;
 use futures::sync::mpsc;
 use tokio::net::{TcpStream, tcp::ConnectFuture};
 use tokio::timer::{Delay, Error as TimerError};
-use tokio::prelude::AsyncRead;
-use serde::{Deserialize};
+use tokio::prelude::{AsyncRead, AsyncWrite};
+use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use crate::signal;
 
-#[derive(Deserialize)]
+fn empty_value() -> Option<u32> {
+    None
+}
+
+fn empty_string() -> String {
+    "".to_owned()
+}
+
+#[derive(Serialize, Deserialize)]
 struct InnerMessage {
-    #[serde(rename(deserialize="type"))]
+    #[serde(rename(serialize="type", deserialize="type"), default="empty_string")]
     msg_type: String,
+    #[serde(default="empty_value")]
+    request_id: Option<u32>,
     data: Value,
 }
 
-#[derive(Deserialize)]
-struct MessageType {
-    #[serde(rename(deserialize="type"))]
+#[derive(Serialize, Deserialize)]
+pub struct MessageRequest {
+    #[serde(rename(serialize="type", deserialize="type"))]
     msg_type: String,
     data: InnerMessage,
+}
+
+impl MessageRequest {
+    pub fn new(msg_type: &str, data: String) -> Self {
+        Self {
+            msg_type: "app.send_message".to_owned(),
+            data: InnerMessage {
+                msg_type: msg_type.to_owned(),
+                request_id: Some(1),
+                data: Value::String(data),
+            },
+        }
+    }
+
+    pub fn as_str(&self) -> String {
+        serde_json::to_string(self).unwrap() + "\x0c"
+    }
 }
 
 pub struct ClientError;
@@ -53,7 +80,7 @@ pub enum RequestState {
 }
 
 fn parse_message(message: &str) -> Result<RequestState, ClientError> {
-    let request: MessageType = serde_json::from_str(message)?;
+    let request: MessageRequest = serde_json::from_str(message)?;
     if request.msg_type == "app.broadcast" {
         if request.data.msg_type == "image" {
             match request.data.data.as_str() {
@@ -86,16 +113,20 @@ enum ClientFutureState {
 
 pub struct ClientFuture {
     state: ClientFutureState,
+    messages: Vec<MessageRequest>,
     sender: mpsc::UnboundedSender<RequestState>,
+    receiver: mpsc::UnboundedReceiver<MessageRequest>,
     exit_status: Shared<signal::TerminationFuture>,
 }
 
 impl ClientFuture {
-    pub fn new(sender: mpsc::UnboundedSender<RequestState>, exit_status: Shared<signal::TerminationFuture>) -> Self {
+    pub fn new(sender: mpsc::UnboundedSender<RequestState>, receiver: mpsc::UnboundedReceiver<MessageRequest>,exit_status: Shared<signal::TerminationFuture>) -> Self {
         Self {
             state: ClientFutureState::Connecting(Self::connect()),
             sender,
             exit_status,
+            messages: Vec::new(),
+            receiver,
         }
     }
 
@@ -121,12 +152,25 @@ impl Future for ClientFuture {
     type Item = ();
     type Error = ClientError;
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         match self.exit_status.poll() {
             Ok(Async::Ready(_)) => return Ok(Async::Ready(())),
             Ok(Async::NotReady) => (),
             Err(_) => return Err(ClientError),
         };
+        // Receive messages to send
+        loop {
+            match self.receiver.poll() {
+                Ok(Async::Ready(Some(message))) => {
+                    self.messages.push(message);
+                },
+                Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
+                Ok(Async::NotReady) => break,
+                Err(_) => return Err(ClientError),
+            }
+        }
+
+        // Socket handling (receiving/sending/reconnecting)
         loop {
             match &mut self.state {
                 ClientFutureState::Disconnected => {
@@ -160,6 +204,18 @@ impl Future for ClientFuture {
                     }
                 },
                 ClientFutureState::Reading(stream) => {
+                    while self.messages.len() > 0 {
+                        println!("polling write");
+                        match stream.poll_write(&self.messages[0].as_str().as_bytes()) {
+                            Ok(Async::Ready(bytes)) => {
+                                println!("sent bytes: {}", bytes);
+                                self.messages.remove(0);
+                            },
+                            Ok(Async::NotReady) => break,
+                            Err(_) => break,
+                        };
+                    }
+
                     let mut data = vec![0u8; 256];
                     match stream.poll_read(&mut data) {
                         Ok(Async::Ready(bytes)) => {

@@ -2,12 +2,14 @@ use std::sync::{Arc, Mutex};
 use std::fs;
 use crate::db::DBConnection;
 use crate::signal::TerminationFuture;
+use crate::client::MessageRequest;
 use serenity::Client;
 use serenity::client::bridge::gateway::{ShardManager, event::ShardStageUpdateEvent};
 use serenity::prelude::{TypeMapKey, EventHandler, Context, Mutex as SerenityMutex};
 use serenity::gateway::ConnectionStage;
 use serenity::model::channel::Message;
 use serenity::model::id::ChannelId;
+use futures::sync::mpsc;
 use futures::{Poll, Future, Async};
 use futures::future::Shared;
 
@@ -86,6 +88,13 @@ impl EventHandler for JWHandler {
                 self.send_message(&ctx, msg.channel_id, &help_string);
             }
         }
+        if msg.content == "!test" && msg.author.id.0 == 229419335930609664 {
+            let sender = data_lock.get::<SenderMapKey>().unwrap();
+            match sender.unbounded_send(MessageRequest::new("request_shop", "to_server".to_owned())) {
+                Ok(_) => println!("idk1"),
+                Err(_) => println!("idk2"),
+            };
+        }
     }
 
     fn shard_stage_update(&self, ctx: Context, evt: ShardStageUpdateEvent) {
@@ -106,13 +115,20 @@ impl TypeMapKey for DBMapKey {
     type Value = Mutex<DBConnection>;
 }
 
-pub fn build_client() -> Client {
+struct SenderMapKey;
+
+impl TypeMapKey for SenderMapKey {
+    type Value = mpsc::UnboundedSender<MessageRequest>;
+}
+
+pub fn build_client(sender: mpsc::UnboundedSender<MessageRequest>) -> Client {
     let bot_token = std::env::var("DISCORD_TOKEN").unwrap();
     let discord_client = Client::new(bot_token, JWHandler).unwrap();
 
     {
         let mut data = discord_client.data.write();
         data.insert::<DBMapKey>(Mutex::new(DBConnection::new().unwrap()));
+        data.insert::<SenderMapKey>(sender);
     }
 
     discord_client

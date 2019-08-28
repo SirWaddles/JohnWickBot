@@ -351,7 +351,7 @@ fn main() {
     let https = hyper_tls::HttpsConnector::new(4).unwrap();
     let http_client = hyper::Client::builder().build::<_, hyper::Body>(https);
 
-    let unb_channel = mpsc::unbounded::<RequestState>();
+    let (bc_send, bc_recv) = mpsc::unbounded::<RequestState>();
 
     let term_future = signal::TerminationFuture::new().shared();
 
@@ -359,12 +359,14 @@ fn main() {
     let hyper_runtime = HyperRuntime {
         client: Arc::new(http_client),
         bot_token,
-        receiver: unb_channel.1,
+        receiver: bc_recv,
         exit_status: term_future.clone(),
     };
 
-    let client_runtime = client::ClientFuture::new(unb_channel.0, term_future.clone()).map_err(|_| println!("Client Error"));
-    let mut discord_client = discord::build_client();
+    let (msg_send, msg_recv) = mpsc::unbounded::<client::MessageRequest>();
+
+    let client_runtime = client::ClientFuture::new(bc_send, msg_recv, term_future.clone()).map_err(|_| println!("Client Error"));
+    let mut discord_client = discord::build_client(msg_send);
 
     let discord_end = discord::DiscordTermination::new(discord_client.shard_manager.clone(), term_future.clone());
 
