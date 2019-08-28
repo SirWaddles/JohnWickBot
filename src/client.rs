@@ -1,8 +1,10 @@
 use std::str;
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use futures::{Future, Async, Poll, Stream};
 use futures::future::Shared;
-use futures::sync::mpsc;
+use futures::sync::{mpsc, oneshot};
 use tokio::net::{TcpStream, tcp::ConnectFuture};
 use tokio::timer::{Delay, Error as TimerError};
 use tokio::prelude::{AsyncRead, AsyncWrite};
@@ -18,7 +20,7 @@ fn empty_string() -> String {
     "".to_owned()
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct InnerMessage {
     #[serde(rename(serialize="type", deserialize="type"), default="empty_string")]
     msg_type: String,
@@ -27,7 +29,7 @@ struct InnerMessage {
     data: Value,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MessageRequest {
     #[serde(rename(serialize="type", deserialize="type"))]
     msg_type: String,
@@ -35,12 +37,12 @@ pub struct MessageRequest {
 }
 
 impl MessageRequest {
-    pub fn new(msg_type: &str, data: String) -> Self {
+    pub fn new(msg_type: &str, data: String, request_id: u32) -> Self {
         Self {
             msg_type: "app.send_message".to_owned(),
             data: InnerMessage {
                 msg_type: msg_type.to_owned(),
-                request_id: Some(1),
+                request_id: Some(request_id),
                 data: Value::String(data),
             },
         }
@@ -48,6 +50,10 @@ impl MessageRequest {
 
     pub fn as_str(&self) -> String {
         serde_json::to_string(self).unwrap() + "\x0c"
+    }
+
+    pub fn get_data(&self) -> &Value {
+        &self.data.data
     }
 }
 
@@ -76,32 +82,54 @@ impl From<serde_json::Error> for ClientError {
 pub enum RequestState {
     MessageBroadcast(String),
     ImageBroadcast(String),
-    ImageRequest(String),
+    Other,
 }
 
-fn parse_message(message: &str) -> Result<RequestState, ClientError> {
-    let request: MessageRequest = serde_json::from_str(message)?;
-    if request.msg_type == "app.broadcast" {
-        if request.data.msg_type == "image" {
-            match request.data.data.as_str() {
-                Some(path) => return Ok(RequestState::ImageBroadcast(path.to_owned())),
-                None => return Err(ClientError),
-            };
-        }
-        if request.data.msg_type == "message_broadcast" {
-            match request.data.data.as_str() {
-                Some(msg) => return Ok(RequestState::MessageBroadcast(msg.to_owned())),
-                None => return Err(ClientError),
-            };
+pub struct ResponseFuture {
+    receiver: oneshot::Receiver<MessageRequest>,
+}
+
+impl Future for ResponseFuture {
+    type Item = MessageRequest;
+    type Error = ClientError;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        match self.receiver.poll() {
+            Ok(Async::Ready(msg)) => Ok(Async::Ready(msg)),
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Err(_) => Err(ClientError),
         }
     }
-    if request.msg_type == "app.receive_message" {
-        match request.data.data.as_str() {
-            Some(msg) => return Ok(RequestState::ImageRequest(msg.to_owned())),
-            None => return Err(ClientError),
+}
+
+pub struct MessageManager {
+    request_id: u32,
+    active_messages: HashMap<u32, oneshot::Sender<MessageRequest>>,
+    sender: mpsc::UnboundedSender<MessageRequest>,
+}
+
+impl MessageManager {
+    pub fn new(sender: mpsc::UnboundedSender<MessageRequest>) -> Self {
+        Self {
+            request_id: 0,
+            active_messages: HashMap::new(),
+            sender,
+        }
+    }
+
+    pub fn add_message(&mut self, msg_type: &str, msg: String) -> ResponseFuture {
+        self.request_id += 1;
+        let message = MessageRequest::new(msg_type, msg, self.request_id);
+        self.sender.unbounded_send(message).unwrap();
+        let (msg_send, msg_recv) = oneshot::channel::<MessageRequest>();
+        self.active_messages.insert(self.request_id, msg_send);
+
+        let future = ResponseFuture {
+            receiver: msg_recv,
         };
+
+        future
     }
-    Err(ClientError)
 }
 
 enum ClientFutureState {
@@ -114,19 +142,21 @@ enum ClientFutureState {
 pub struct ClientFuture {
     state: ClientFutureState,
     messages: Vec<MessageRequest>,
+    message_manager: Arc<Mutex<MessageManager>>,
     sender: mpsc::UnboundedSender<RequestState>,
     receiver: mpsc::UnboundedReceiver<MessageRequest>,
     exit_status: Shared<signal::TerminationFuture>,
 }
 
 impl ClientFuture {
-    pub fn new(sender: mpsc::UnboundedSender<RequestState>, receiver: mpsc::UnboundedReceiver<MessageRequest>,exit_status: Shared<signal::TerminationFuture>) -> Self {
+    pub fn new(sender: mpsc::UnboundedSender<RequestState>, receiver: mpsc::UnboundedReceiver<MessageRequest>, exit_status: Shared<signal::TerminationFuture>, message_manager: Arc<Mutex<MessageManager>>) -> Self {
         Self {
             state: ClientFutureState::Connecting(Self::connect()),
             sender,
             exit_status,
             messages: Vec::new(),
             receiver,
+            message_manager,
         }
     }
 
@@ -138,13 +168,44 @@ impl ClientFuture {
         println!("Received Message {} bytes long.", len);
         match str::from_utf8(&data[0..(len - 1)]) {
             Ok(v) => {
-                match parse_message(v) {
+                match self.parse_message(v) {
                     Ok(message) => self.sender.unbounded_send(message).unwrap(),
                     Err(_) => println!("Could not parse message: {}", v),
                 };
             },
             Err(_) => return,
         }
+    }
+
+    fn parse_message(&self, message: &str) -> Result<RequestState, ClientError> {
+        let request: MessageRequest = serde_json::from_str(message)?;
+        if request.msg_type == "app.broadcast" {
+            if request.data.msg_type == "image" {
+                match request.data.data.as_str() {
+                    Some(path) => return Ok(RequestState::ImageBroadcast(path.to_owned())),
+                    None => return Err(ClientError),
+                };
+            }
+            if request.data.msg_type == "message_broadcast" {
+                match request.data.data.as_str() {
+                    Some(msg) => return Ok(RequestState::MessageBroadcast(msg.to_owned())),
+                    None => return Err(ClientError),
+                };
+            }
+        }
+        if request.msg_type == "app.receive_message" {
+            if let Some(request_id) = request.data.request_id {
+                let mut manager = self.message_manager.lock().unwrap();
+                if manager.active_messages.contains_key(&request_id) {
+                    let response = manager.active_messages.remove(&request_id).unwrap();
+                    if let Err(_) = response.send(request.clone()) {
+                        println!("Error sending response to queue");
+                    }
+                }
+            }
+            return Ok(RequestState::Other);
+        }
+        Err(ClientError)
     }
 }
 

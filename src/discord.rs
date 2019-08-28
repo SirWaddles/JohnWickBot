@@ -2,14 +2,13 @@ use std::sync::{Arc, Mutex};
 use std::fs;
 use crate::db::DBConnection;
 use crate::signal::TerminationFuture;
-use crate::client::MessageRequest;
+use crate::client::MessageManager;
 use serenity::Client;
 use serenity::client::bridge::gateway::{ShardManager, event::ShardStageUpdateEvent};
 use serenity::prelude::{TypeMapKey, EventHandler, Context, Mutex as SerenityMutex};
 use serenity::gateway::ConnectionStage;
 use serenity::model::channel::Message;
 use serenity::model::id::ChannelId;
-use futures::sync::mpsc;
 use futures::{Poll, Future, Async};
 use futures::future::Shared;
 
@@ -88,12 +87,17 @@ impl EventHandler for JWHandler {
                 self.send_message(&ctx, msg.channel_id, &help_string);
             }
         }
-        if msg.content == "!test" && msg.author.id.0 == 229419335930609664 {
-            let sender = data_lock.get::<SenderMapKey>().unwrap();
-            match sender.unbounded_send(MessageRequest::new("request_shop", "to_server".to_owned())) {
-                Ok(_) => println!("idk1"),
-                Err(_) => println!("idk2"),
+        if msg.content == "!shop" {
+            let future = {
+                let sender = data_lock.get::<SenderMapKey>().unwrap();
+                let mut lock = sender.lock().unwrap();
+                lock.add_message("request_shop", "to_server".to_owned())
             };
+            let response = match future.wait() {
+                Ok(val) => val,
+                Err(_) => panic!("future error I guess"),
+            };
+            self.send_message(&ctx, msg.channel_id, response.get_data().as_str().unwrap());
         }
     }
 
@@ -118,10 +122,10 @@ impl TypeMapKey for DBMapKey {
 struct SenderMapKey;
 
 impl TypeMapKey for SenderMapKey {
-    type Value = mpsc::UnboundedSender<MessageRequest>;
+    type Value = Arc<Mutex<MessageManager>>;
 }
 
-pub fn build_client(sender: mpsc::UnboundedSender<MessageRequest>) -> Client {
+pub fn build_client(sender: Arc<Mutex<MessageManager>>) -> Client {
     let bot_token = std::env::var("DISCORD_TOKEN").unwrap();
     let discord_client = Client::new(bot_token, JWHandler).unwrap();
 

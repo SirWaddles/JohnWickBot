@@ -11,7 +11,7 @@ mod db;
 mod signal;
 mod discord;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::{cmp, thread, time};
 use tokio::timer;
 use serde_json::{json, Value as JsonValue};
@@ -364,9 +364,10 @@ fn main() {
     };
 
     let (msg_send, msg_recv) = mpsc::unbounded::<client::MessageRequest>();
+    let msg_manager = Arc::new(Mutex::new(client::MessageManager::new(msg_send)));
 
-    let client_runtime = client::ClientFuture::new(bc_send, msg_recv, term_future.clone()).map_err(|_| println!("Client Error"));
-    let mut discord_client = discord::build_client(msg_send);
+    let client_runtime = client::ClientFuture::new(bc_send, msg_recv, term_future.clone(), msg_manager.clone()).map_err(|_| println!("Client Error"));
+    let mut discord_client = discord::build_client(msg_manager.clone());
 
     let discord_end = discord::DiscordTermination::new(discord_client.shard_manager.clone(), term_future.clone());
 
