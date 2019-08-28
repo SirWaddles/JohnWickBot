@@ -87,6 +87,7 @@ pub enum RequestState {
 
 pub struct ResponseFuture {
     receiver: oneshot::Receiver<MessageRequest>,
+    timeout: Delay,
 }
 
 impl Future for ResponseFuture {
@@ -96,7 +97,13 @@ impl Future for ResponseFuture {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         match self.receiver.poll() {
             Ok(Async::Ready(msg)) => Ok(Async::Ready(msg)),
-            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Ok(Async::NotReady) => {
+                match self.timeout.poll() {
+                    Ok(Async::Ready(_)) => Err(ClientError),
+                    Ok(Async::NotReady) => Ok(Async::NotReady),
+                    Err(_) => Err(ClientError),
+                }
+            },
             Err(_) => Err(ClientError),
         }
     }
@@ -126,6 +133,7 @@ impl MessageManager {
 
         let future = ResponseFuture {
             receiver: msg_recv,
+            timeout: Delay::new(Instant::now() + Duration::from_secs(20)),
         };
 
         future

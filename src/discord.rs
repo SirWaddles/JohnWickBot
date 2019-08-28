@@ -95,7 +95,7 @@ impl EventHandler for JWHandler {
             };
             let response = match future.wait() {
                 Ok(val) => val,
-                Err(_) => panic!("future error I guess"),
+                Err(_) => return,
             };
             self.send_message(&ctx, msg.channel_id, response.get_data().as_str().unwrap());
         }
