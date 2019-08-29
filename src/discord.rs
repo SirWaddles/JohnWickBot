@@ -111,7 +111,7 @@ impl EventHandler for JWHandler {
                 }
             }
 
-            if &msg.content[..10] == "!broadcast" {
+            if msg.content.len() >= 10 && &msg.content[..10] == "!broadcast" {
                 let future = {
                     let sender = data_lock.get::<SenderMapKey>().unwrap();
                     let mut lock = sender.lock().unwrap();
