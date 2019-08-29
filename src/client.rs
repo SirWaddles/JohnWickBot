@@ -105,7 +105,10 @@ impl Future for ResponseFuture {
                         return Err(ClientError);
                     },
                     Ok(Async::NotReady) => Ok(Async::NotReady),
-                    Err(_) => Err(ClientError),
+                    Err(e) => {
+                        println!("Timer Error: {}", e);
+                        return Err(ClientError);
+                    },
                 }
             },
             Err(_) => Err(ClientError),
