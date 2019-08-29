@@ -98,8 +98,12 @@ impl Future for ResponseFuture {
         match self.receiver.poll() {
             Ok(Async::Ready(msg)) => Ok(Async::Ready(msg)),
             Ok(Async::NotReady) => {
+                println!("Waiting on Timeout");
                 match self.timeout.poll() {
-                    Ok(Async::Ready(_)) => Err(ClientError),
+                    Ok(Async::Ready(_)) => {
+                        println!("Request timed out");
+                        return Err(ClientError);
+                    },
                     Ok(Async::NotReady) => Ok(Async::NotReady),
                     Err(_) => Err(ClientError),
                 }
