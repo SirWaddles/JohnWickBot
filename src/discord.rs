@@ -56,8 +56,8 @@ impl JWHandler {
 impl EventHandler for JWHandler {
     fn message(&self, ctx: Context, msg: Message) {
         let data_lock = ctx.data.read();
-        let db = data_lock.get::<DBMapKey>().unwrap().lock().unwrap();
         if msg.content == "!subscribe" {
+            let db = data_lock.get::<DBMapKey>().unwrap().lock().unwrap();
             match db.channel_exists(msg.channel_id.0 as i64) {
                 Ok(true) => {
                     self.send_message(&ctx, msg.channel_id, "This channel is already subscribed.");
@@ -79,6 +79,7 @@ impl EventHandler for JWHandler {
             };
         }
         if msg.content == "!unsubscribe" {
+            let db = data_lock.get::<DBMapKey>().unwrap().lock().unwrap();
             db.delete_channel(msg.channel_id.0 as i64).unwrap();
             self.send_message(&ctx, msg.channel_id, "I'll stop sending messages here.");
         }
@@ -91,13 +92,35 @@ impl EventHandler for JWHandler {
             let future = {
                 let sender = data_lock.get::<SenderMapKey>().unwrap();
                 let mut lock = sender.lock().unwrap();
-                lock.add_message("request_shop", "to_server".to_owned())
+                lock.add_message("request_image", "to_server".to_owned())
             };
-            let response = match future.wait() {
-                Ok(val) => val,
-                Err(_) => return,
-            };
-            self.send_message(&ctx, msg.channel_id, response.get_data().as_str().unwrap());
+            if let Ok(response) = future.wait() {
+                self.send_message(&ctx, msg.channel_id, response.get_data().as_str().unwrap());
+            }
+        }
+        // Admin commands
+        if msg.author.id.0 == 229419335930609664 {
+            if msg.content == "!refresh" {
+                let future = {
+                    let sender = data_lock.get::<SenderMapKey>().unwrap();
+                    let mut lock = sender.lock().unwrap();
+                    lock.add_message("request_refresh", "to_server".to_owned())
+                };
+                if let Ok(response) = future.wait() {
+                    self.send_message(&ctx, msg.channel_id, response.get_data().as_str().unwrap());
+                }
+            }
+
+            if &msg.content[..10] == "!broadcast" {
+                let future = {
+                    let sender = data_lock.get::<SenderMapKey>().unwrap();
+                    let mut lock = sender.lock().unwrap();
+                    lock.add_message("request_broadcast", (&msg.content[11..]).to_owned())
+                };
+                if let Ok(_) = future.wait() {
+                    self.send_message(&ctx, msg.channel_id, "Broadcast finished");
+                }
+            }
         }
     }
 
