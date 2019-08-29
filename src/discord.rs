@@ -97,7 +97,6 @@ impl EventHandler for JWHandler {
             if let Ok(response) = future.wait() {
                 self.send_message(&ctx, msg.channel_id, response.get_data().as_str().unwrap());
             }
-            println!("finished waiting");
         }
         // Admin commands
         if msg.author.id.0 == 229419335930609664 {
