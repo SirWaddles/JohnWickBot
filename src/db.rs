@@ -1,6 +1,7 @@
 extern crate postgres;
 
-use postgres::{Connection, TlsMode, Result as DBResult, Error as DBError};
+use postgres::{Connection, TlsMode, Result as DBResult};
+pub use postgres::Error as DBError;
 
 pub struct DBConnection {
     conn: Connection,
