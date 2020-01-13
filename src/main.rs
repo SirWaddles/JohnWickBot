@@ -119,7 +119,7 @@ fn send_message(client: &Arc<HyperClient>, bot_token: &str, message_content: &st
         .method("POST")
         .header("Authorization", "Bot ".to_owned() + bot_token)
         .header("Content-Type", "application/json")
-        .header("User-Agent", "JohnWickBot(https://johnwickbot.shop, 0.1)")
+        .header("User-Agent", "JohnWickBot(https://wickshopbot.com, 0.1)")
         .body(hyper::Body::from(request_body))
         .unwrap();
 
@@ -335,7 +335,7 @@ impl Future for HyperRuntime {
 
             match request {
                 RequestState::ImageBroadcast(filename) => {
-                    let message = "https://johnwickbot.shop/".to_owned() + &filename;
+                    let message = "https://wickshopbot.com/".to_owned() + &filename;
                     tokio::spawn(MessageBroadcast::new(&self.client, &self.bot_token, &message));
                 },
                 RequestState::MessageBroadcast(message) => {
