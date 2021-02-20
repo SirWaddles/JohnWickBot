@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::cmp;
 use hyper::http::Request;
 use hyper::{StatusCode, HeaderMap};
+use hyper::header::HeaderValue;
 use bytes::buf::{Buf, Reader};
 use serde_json::{json, Value as JsonValue};
 use futures::future::Future;
@@ -37,6 +38,26 @@ struct BroadcastResultInner {
 type BoxedError = Box<dyn Error + Send + Sync>;
 type BroadcastResult = Result<BroadcastResultInner, BoxedError>;
 
+fn parse_header(data: Option<&HeaderValue>) -> Result<u64, BoxedError> {
+    match data {
+        Some(d) => {
+            let f: f64 = d.to_str()?.parse()?;
+            Ok(f as u64)
+        },
+        None => Ok(0),
+    }
+}
+
+fn parse_header_wrap(data: Option<&HeaderValue>) -> u64 {
+    match parse_header(data) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("Error: {:#?}", e);
+            0
+        }
+    }
+}
+
 impl BroadcastResultInner {
     fn new(status_code: StatusCode, headers: &HeaderMap) -> Self {
         Self {
@@ -47,14 +68,8 @@ impl BroadcastResultInner {
                 StatusCode::NOT_FOUND => BroadcastResultType::NotFound,
                 _ => BroadcastResultType::Unknown,
             },
-            rate_limit_left: match headers.get("X-RateLimit-Remaining") {
-                Some(val) => val.to_str().unwrap().parse().unwrap(),
-                None => 0,
-            },
-            rate_limit_stamp: match headers.get("X-RateLimit-Reset") {
-                Some(val) => val.to_str().unwrap().parse().unwrap(),
-                None => 0,
-            },
+            rate_limit_left: parse_header_wrap(headers.get("X-RateLimit-Remaining")) as u32,
+            rate_limit_stamp: parse_header_wrap(headers.get("X-RateLimit-Reset")),
             rate_limit_retry: 0,
             rate_limit_bucket: match headers.get("X-RateLimit-Bucket") {
                 Some(val) => Some(val.to_str().unwrap().to_owned()),
@@ -79,8 +94,8 @@ impl BroadcastResultInner {
                 };
             },
             BroadcastResultType::RateLimited => {
-                let limit = response["retry_after"].as_u64().unwrap();
-                res.rate_limit_retry = limit;
+                let limit = response["retry_after"].as_f64().unwrap();
+                res.rate_limit_retry = limit as u64;
             },
             BroadcastResultType::NotFound => {
                 if let Some(code) = response["code"].as_u64() {
@@ -138,7 +153,7 @@ impl BroadcastInstance {
 
 const REQUEST_COUNT: usize = 30;
 
-struct MessageBroadcast {
+pub struct MessageBroadcast {
     client: Arc<HyperClient>,
     total_requests: Vec<BroadcastInstance>,
     ongoing_requests: Vec<BroadcastInstance>,
@@ -149,13 +164,13 @@ struct MessageBroadcast {
 }
 
 impl MessageBroadcast {
-    pub fn new(db: Arc<db::DBManager>, channels: Vec<i64>, client: &Arc<HyperClient>, bot_token: &str, message_content: &str) -> Self {
+    pub fn new(db: Arc<db::DBManager>, channels: Vec<i64>, client: Arc<HyperClient>, bot_token: String, message_content: &str) -> Self {
         println!("Starting Broadcast: {}", message_content);
         
         Self {
-            client: Arc::clone(client),
-            total_requests: channels.into_iter().map(|v| BroadcastInstance::new(client, bot_token, message_content, v)).collect(),
-            bot_token: bot_token.to_owned(),
+            client: Arc::clone(&client),
+            total_requests: channels.into_iter().map(|v| BroadcastInstance::new(&client, &bot_token, message_content, v)).collect(),
+            bot_token: bot_token,
             message_content: message_content.to_owned(),
             ongoing_requests: Vec::new(),
             timer: None,

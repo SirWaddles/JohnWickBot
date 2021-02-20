@@ -20,10 +20,12 @@ impl DBManager {
         let conn_str = std::env::var("PSQL_URI").unwrap();
         let (client, connection) = tokio_postgres::connect(&conn_str, NoTls).await?;
 
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
-        }
-
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        
         Ok(Self {
             client,
         })

@@ -44,6 +44,31 @@ impl EventHandler for Handler {
                 println!("Error sending message: {:?}", why);
             }
         }
+
+        if msg.author.id.0 == 229419335930609664 {
+            if msg.content.len() >= 10 && &msg.content[..10] == "!broadcast" {
+                let data_lock = ctx.data.read().await;
+                let (token, http, db) = {
+                    let token = data_lock.get::<BotToken>().unwrap().clone();
+                    let http = data_lock.get::<HttpClient>().unwrap();
+                    let db = data_lock.get::<DBManager>().unwrap();
+                    (token, Arc::clone(http), Arc::clone(db))
+                };
+
+                tokio::spawn(async move {
+                    let channels = match db.get_channels().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            println!("DB Error: {:#?}", e);
+                            return;
+                        },
+                    };
+
+                    let cast = broadcast::MessageBroadcast::new(db, channels, http, token, &msg.content[11..]);
+                    cast.await;
+                });
+            }
+        }
     }
 }
 
@@ -57,9 +82,11 @@ async fn main() {
 
     let https = hyper_tls::HttpsConnector::new();
     let http_client = hyper::Client::builder().build::<_, hyper::Body>(https);
+    println!("Connecting to Database");
     let db_man = db::DBManager::new().await.unwrap();
 
     {
+        println!("Writing Context");
         let mut data = client.data.write().await;
         data.insert::<BotToken>(token);
         data.insert::<HttpClient>(Arc::new(http_client));
