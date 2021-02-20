@@ -5,20 +5,22 @@ authors = ["Waddlesworth <github@genj.io>"]
 edition = "2018"
 
 [dependencies]
-"serenity" = "0.6"
-"postgres" = "0.15"
-"hyper-tls" = "0.3"
-"mio" = "0.6"
-"futures" = "0.1"
-"tokio" = "0.1"
+"hyper-tls" = "0.5"
+"futures" = "0.3"
+"tokio-postgres" = "0.6"
 "serde" = "1.0"
 "serde_json" = "1.0"
+"pin-project" = "1.0"
+"chrono" = "0.4"
+tokio = { version = "1", features = ["full"] }
+"bytes" = "1.0"
 
 [dependencies.hyper]
-version = "0.12"
+version = "0.14"
 default-features = false
-features = [ ]
+features = [ "client", "stream", "http1" ]
 
-[dependencies.ctrlc]
-version = "3.1"
-features = [ "termination" ]
+[dependencies.serenity]
+version = "0.10"
+default-features = false
+features = [ "builder", "cache", "client", "gateway", "http", "model", "utils", "rustls_backend" ]
