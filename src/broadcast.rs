@@ -1,15 +1,16 @@
 use std::sync::Arc;
 use std::pin::Pin;
 use std::cmp;
+use std::io::Read;
 use hyper::http::Request;
 use hyper::{StatusCode, HeaderMap};
 use hyper::header::HeaderValue;
-use bytes::buf::{Buf, Reader};
+use bytes::buf::Buf;
 use serde_json::{json, Value as JsonValue};
 use futures::future::Future;
 use futures::task::{Poll, Context};
 use tokio::time as ttime;
-use std::error::Error;
+use crate::BoxedError;
 use crate::db;
 
 type HyperClient = hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>;
@@ -35,7 +36,6 @@ struct BroadcastResultInner {
     rate_limit_bucket: Option<String>,
 }
 
-type BoxedError = Box<dyn Error + Send + Sync>;
 type BroadcastResult = Result<BroadcastResultInner, BoxedError>;
 
 fn parse_header(data: Option<&HeaderValue>) -> Result<u64, BoxedError> {
@@ -70,7 +70,7 @@ impl BroadcastResultInner {
             },
             rate_limit_left: parse_header_wrap(headers.get("X-RateLimit-Remaining")) as u32,
             rate_limit_stamp: parse_header_wrap(headers.get("X-RateLimit-Reset")),
-            rate_limit_retry: 0,
+            rate_limit_retry: 400,
             rate_limit_bucket: match headers.get("X-RateLimit-Bucket") {
                 Some(val) => Some(val.to_str().unwrap().to_owned()),
                 None => None,
@@ -78,10 +78,13 @@ impl BroadcastResultInner {
         }
     }
 
-    fn from(&self, message_body: Reader<impl Buf>) -> Self {
-        let response: JsonValue = match serde_json::from_reader(message_body) {
+    fn from(&self, message_body: String) -> Self {
+        let response: JsonValue = match serde_json::from_str(&message_body) {
             Ok(val) => val,
-            Err(_) => return self.clone(),
+            Err(e) => {
+                println!("JSON Error: {} {}", &message_body, e);
+                return self.clone();
+            },
         };
         let mut res = self.clone();
         match self.status {
@@ -95,7 +98,7 @@ impl BroadcastResultInner {
             },
             BroadcastResultType::RateLimited => {
                 let limit = response["retry_after"].as_f64().unwrap();
-                res.rate_limit_retry = limit as u64;
+                res.rate_limit_retry = (limit * 1000.0) as u64;
             },
             BroadcastResultType::NotFound => {
                 if let Some(code) = response["code"].as_u64() {
@@ -129,7 +132,14 @@ async fn send_message(client: Arc<HyperClient>, bot_token: String, message_conte
     let req = client.request(request).await.unwrap();
     let status = BroadcastResultInner::new(req.status(), req.headers());
     let body = hyper::body::aggregate(req).await?;
-    Ok(BroadcastResultInner::from(&status, body.reader()))
+
+    let mut reader = body.reader();
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data)?;
+
+    let s = String::from_utf8(data).unwrap();
+
+    Ok(BroadcastResultInner::from(&status, s))
 
 }
 

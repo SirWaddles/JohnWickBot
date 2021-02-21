@@ -9,6 +9,15 @@ impl From<DBError> for DBErr {
     }
 }
 
+impl std::fmt::Display for DBErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Database Error")
+    }
+}
+
+impl std::error::Error for DBErr {}
+
+
 type DBResult<T> = Result<T, DBErr>;
 
 pub struct DBManager {
