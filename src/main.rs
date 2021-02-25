@@ -1,5 +1,5 @@
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as SMutex};
 use std::error::Error;
 use chrono::prelude::*;
 use serenity::{
@@ -10,6 +10,8 @@ use serenity::{
 
 mod db;
 mod broadcast;
+mod shutdown;
+mod client;
 
 type BoxedError = Box<dyn Error + Send + Sync>;
 type JWResult<T> = Result<T, BoxedError>;
@@ -27,6 +29,10 @@ impl TypeMapKey for HttpClient {
 struct DBManager {}
 impl TypeMapKey for DBManager {
     type Value = Arc<db::DBManager>;
+}
+
+impl TypeMapKey for client::ClientManager {
+    type Value = Arc<SMutex<client::ClientManager>>;
 }
 
 struct Handler;
@@ -94,12 +100,30 @@ impl Handler {
         self.send_message(&ctx, msg.channel_id, "I'll stop sending messages here.").await?;
         Ok(())
     }
+
+    async fn request_refresh(&self, ctx: &Context, msg: &Message) -> JWResult<()> {
+        let manager = {
+            let lock = ctx.data.read().await;
+            Arc::clone(lock.get::<client::ClientManager>().unwrap())
+        };
+
+        let req = client::send_message(&manager, "request_refresh", "to_server".to_owned()).await?;
+        let url = match req.get_data().as_str() {
+            Some(d) => d,
+            None => {
+                return Err("Value not a String".into());
+            }
+        };
+        self.send_message(&ctx, msg.channel_id, url).await?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
-        println!("{} is connected!", ready.user.name);
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        println!("{} {} is connected!", ready.user.name, ctx.shard_id);
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -134,6 +158,17 @@ impl EventHandler for Handler {
         }
 
         if msg.author.id.0 == 229419335930609664 {
+            if msg.content == "!refresh" {
+                match self.request_refresh(&ctx, &msg).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        println!("Error: {}", e);
+                    },
+                };
+                return;
+            }
+
+
             if msg.content.len() >= 10 && &msg.content[..10] == "!broadcast" {
                 let data_lock = ctx.data.read().await;
                 let (token, http, db) = {
@@ -173,13 +208,19 @@ async fn main() {
     println!("Connecting to Database");
     let db_man = db::DBManager::new().await.unwrap();
 
+    println!("Connecting to JohnWick Server");
+    let client_man = client::connect_client();
+
     {
         println!("Writing Context");
         let mut data = client.data.write().await;
         data.insert::<BotToken>(token);
         data.insert::<HttpClient>(Arc::new(http_client));
         data.insert::<DBManager>(Arc::new(db_man));
+        data.insert::<client::ClientManager>(client_man);
     }
+
+    shutdown::build_shutdown(&client.shard_manager);
 
     println!("Starting Bot");
     if let Err(why) = client.start_shards(8).await {
