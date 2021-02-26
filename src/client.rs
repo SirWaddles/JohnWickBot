@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
+use std::pin::Pin;
 use std::collections::HashMap;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::channel::oneshot;
-use futures::stream::StreamExt;
+use futures::stream::{Peekable, StreamExt};
 use futures::future::FutureExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, tcp::OwnedReadHalf};
+use tokio::net::{TcpStream, tcp::OwnedReadHalf, tcp::OwnedWriteHalf};
 use tokio::time::{sleep, Duration};
 use serde::{Serialize, Deserialize};
 use serde_json::Value as JSONValue;
@@ -146,6 +147,23 @@ async fn read_loop(manager: Arc<Mutex<ClientManager>>, mut reader: OwnedReadHalf
     } 
 }
 
+async fn write_loop(peek_read: &mut Pin<Box<Peekable<UnboundedReceiver<MessageRequest>>>>, mut write_socket: OwnedWriteHalf) {
+    // Attempt to write next available item by peeking, then reconnect if write socket unavailable.
+    while let Some(msg) = peek_read.as_mut().peek().await {
+        let buf = msg.as_buf();
+        match write_socket.write_all(&buf).await {
+            Ok(_) => {
+                // Consume peeked item.
+                peek_read.next().await;
+            },
+            Err(e) => {
+                println!("Connection Error: {}", e);
+                break;
+            },
+        };
+    }
+}
+
 async fn connect_loop(manager: Arc<Mutex<ClientManager>>, client_read: UnboundedReceiver<MessageRequest>) {
     let mut peek_read = Box::pin(client_read.peekable());
     loop {
@@ -158,28 +176,13 @@ async fn connect_loop(manager: Arc<Mutex<ClientManager>>, client_read: Unbounded
                 continue;
             },
         };
-        let (read_socket, mut write_socket) = stream.into_split();
+        let (read_socket, write_socket) = stream.into_split();
 
         let read_manager = Arc::clone(&manager);
-        tokio::spawn(async move {
-            read_loop(read_manager, read_socket).await;
-        });
 
-        // Attempt to write next available item by peeking, then reconnect if write socket unavailable.
-
-        while let Some(msg) = peek_read.as_mut().peek().await {
-            let buf = msg.as_buf();
-            match write_socket.write_all(&buf).await {
-                Ok(_) => {
-                    // Consume peeked item.
-                    peek_read.next().await;
-                },
-                Err(e) => {
-                    println!("Connection Error: {}", e);
-                    break;
-                },
-            };
-        }
+        let read_f = Box::pin(read_loop(read_manager, read_socket));
+        let write_f = Box::pin(write_loop(&mut peek_read, write_socket));
+        futures::future::select(read_f, write_f).await;
     }
 }
 
