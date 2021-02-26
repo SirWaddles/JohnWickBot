@@ -170,29 +170,31 @@ impl EventHandler for Handler {
 
 
             if msg.content.len() >= 10 && &msg.content[..10] == "!broadcast" {
-                let data_lock = ctx.data.read().await;
-                let (token, http, db) = {
-                    let token = data_lock.get::<BotToken>().unwrap().clone();
-                    let http = data_lock.get::<HttpClient>().unwrap();
-                    let db = data_lock.get::<DBManager>().unwrap();
-                    (token, Arc::clone(http), Arc::clone(db))
-                };
-
-                tokio::spawn(async move {
-                    let channels = match db.get_channels().await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            println!("DB Error: {:#?}", e);
-                            return;
-                        },
-                    };
-
-                    let cast = broadcast::MessageBroadcast::new(db, channels, http, token, &msg.content[11..]);
-                    cast.await;
-                });
+                broadcast_message(ctx.data, msg.content[11..].to_owned());
             }
         }
     }
+}
+
+fn broadcast_message(context: Arc<RwLock<TypeMap>>, message: String) {
+    tokio::spawn(async move { 
+        let (token, http, db) = {
+            let data_lock = context.read().await;
+            let token = data_lock.get::<BotToken>().unwrap().clone();
+            let http = data_lock.get::<HttpClient>().unwrap();
+            let db = data_lock.get::<DBManager>().unwrap();
+            (token, Arc::clone(http), Arc::clone(db))
+        };
+        let channels = match db.get_channels().await {
+            Ok(r) => r,
+            Err(e) => {
+                println!("DB Error: {:#?}", e);
+                return;
+            },
+        };
+
+        broadcast::MessageBroadcast::new(db, channels, http, token, &message).await;
+    });
 }
 
 #[tokio::main]
@@ -210,6 +212,17 @@ async fn main() {
 
     println!("Connecting to JohnWick Server");
     let client_man = client::connect_client();
+
+    {
+        let mut lock = client_man.lock().unwrap();
+        let client_data = Arc::clone(&client.data);
+        lock.set_broadcast_hook("image", move |v| {
+            if let Some(val) = v.as_str() {
+                let msg = "https://wickshopbot.com/".to_owned() + val; 
+                broadcast_message(Arc::clone(&client_data), msg);
+            }
+        });
+    }
 
     {
         println!("Writing Context");

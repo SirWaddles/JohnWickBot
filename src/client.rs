@@ -64,6 +64,7 @@ pub struct ClientManager {
     sender: UnboundedSender<MessageRequest>,
     request_id: u32,
     active_messages: HashMap<u32, oneshot::Sender<JWResult<MessageRequest>>>,
+    broadcast_hooks: HashMap<String, Box<dyn Fn(&JSONValue) + Send + Sync>>,
 }
 
 pub async fn send_message(manager: &Arc<Mutex<ClientManager>>, msg_type: &str, data: String) -> JWResult<MessageRequest> {
@@ -107,9 +108,20 @@ impl ClientManager {
                     println!("Received Message with ID {} with no sender", req_id);
                 }
             }
+            return Ok(());
+        }
+
+        if req.msg_type == "app.broadcast" {
+            if let Some(clos) = self.broadcast_hooks.get(&req.data.msg_type) {
+                clos(req.get_data());
+            }
         }
 
         Ok(())
+    }
+
+    pub fn set_broadcast_hook<F: Fn(&JSONValue) + Send + Sync + 'static>(&mut self, hook_name: &str, hook: F) {
+        self.broadcast_hooks.insert(hook_name.to_owned(), Box::new(hook));
     }
 }
 
@@ -177,6 +189,7 @@ pub fn connect_client() -> Arc<Mutex<ClientManager>> {
         sender: client_write,
         request_id: 0,
         active_messages: HashMap::new(),
+        broadcast_hooks: HashMap::new(),
     }));
 
     let manager_connect = Arc::clone(&manager);
