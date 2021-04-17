@@ -236,7 +236,7 @@ async fn main() {
     shutdown::build_shutdown(&client.shard_manager);
 
     println!("Starting Bot");
-    if let Err(why) = client.start_shards(8).await {
+    if let Err(why) = client.start_autosharded().await {
         println!("An error occurred while running the client: {:?}", why);
     }
 }
